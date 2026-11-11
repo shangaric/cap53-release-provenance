@@ -74,6 +74,9 @@ jobs:
   release-artifact:
     name: Create Release Artifact
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
     needs:
       - backend-build
       - frontend-build
@@ -119,5 +122,44 @@ jobs:
           path: |
             releasetrack-1.0.0.zip
             releasetrack-1.0.0.zip.sha256
+            releasetrack-backend-1.0.0.jar.sha256
+            frontend-dist-1.0.0.zip
+            frontend-dist-1.0.0.zip.sha256
           if-no-files-found: error
           retention-days: 30
+
+      - name: Configure AWS credentials using OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::021152723784:role/GitHubActions-ReleaseTrack-S3-Upload
+          aws-region: ap-south-1
+
+      - name: Upload release packages to S3
+        run: |
+          S3_PATH="s3://releasetrack-artifacts-2026-unique/releases/${GITHUB_SHA}"
+
+          aws s3 cp release/releasetrack-backend-1.0.0.jar "$S3_PATH/backend/"
+          aws s3 cp releasetrack-backend-1.0.0.jar.sha256 "$S3_PATH/backend/"
+
+          aws s3 cp frontend-dist-1.0.0.zip "$S3_PATH/frontend/"
+          aws s3 cp frontend-dist-1.0.0.zip.sha256 "$S3_PATH/frontend/"
+
+          aws s3 cp releasetrack-1.0.0.zip "$S3_PATH/"
+          aws s3 cp releasetrack-1.0.0.zip.sha256 "$S3_PATH/"
+
+      - name: Package frontend for deployment
+        run: |
+          cd release
+          zip -r ../frontend-dist-1.0.0.zip frontend/
+
+      - name: Generate SHA-256 checksums
+        run: |
+          sha256sum release/releasetrack-backend-1.0.0.jar \
+            > releasetrack-backend-1.0.0.jar.sha256
+
+          sha256sum frontend-dist-1.0.0.zip \
+            > frontend-dist-1.0.0.zip.sha256
+
+          sha256sum releasetrack-1.0.0.zip \
+            > releasetrack-1.0.0.zip.sha256
+
