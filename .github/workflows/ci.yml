@@ -181,7 +181,7 @@ jobs:
       - name: Generate SHA-256 checksums
         run: |
           sha256sum release/releasetrack-backend-1.0.0.jar \
-            > releasetrack-backend-1.0.0.jar.sha256
+            > release/releasetrack-backend-1.0.0.jar.sha256
 
           sha256sum frontend-dist-1.0.0.zip \
             > frontend-dist-1.0.0.zip.sha256
