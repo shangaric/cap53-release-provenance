@@ -119,6 +119,21 @@ jobs:
       - name: Package complete release ZIP
         run: zip -r releasetrack-1.0.0.zip release/
 
+      - name: Prepare Elastic Beanstalk deployment package
+        run: |
+          mkdir -p eb-deployment
+
+          cp release/releasetrack-backend-1.0.0.jar \
+            eb-deployment/application.jar
+
+          echo "web: java -jar application.jar" \
+            > eb-deployment/Procfile
+
+      - name: Package Elastic Beanstalk deployment ZIP
+        run: |
+          cd eb-deployment
+          zip ../releasetrack-eb-1.0.0.zip application.jar Procfile
+
       - name: Generate SHA-256 checksums
         run: |
           sha256sum release/releasetrack-backend-1.0.0.jar \
@@ -129,6 +144,9 @@ jobs:
 
           sha256sum releasetrack-1.0.0.zip \
             > releasetrack-1.0.0.zip.sha256
+          
+          sha256sum releasetrack-eb-1.0.0.zip \
+            > releasetrack-eb-1.0.0.zip.sha256
 
       - name: Upload final release package
         uses: actions/upload-artifact@v7
@@ -140,6 +158,8 @@ jobs:
             release/releasetrack-backend-1.0.0.jar.sha256
             frontend-dist-1.0.0.zip
             frontend-dist-1.0.0.zip.sha256
+            releasetrack-eb-1.0.0.zip
+            releasetrack-eb-1.0.0.zip.sha256
           if-no-files-found: error
           retention-days: 30
 
@@ -161,3 +181,6 @@ jobs:
 
           aws s3 cp releasetrack-1.0.0.zip "$S3_PATH/"
           aws s3 cp releasetrack-1.0.0.zip.sha256 "$S3_PATH/"
+
+          aws s3 cp releasetrack-eb-1.0.0.zip "$S3_PATH/elasticbeanstalk/"
+          aws s3 cp releasetrack-eb-1.0.0.zip.sha256 "$S3_PATH/elasticbeanstalk/"
