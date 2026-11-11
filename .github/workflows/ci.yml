@@ -21,11 +21,11 @@ jobs:
       - name: Checkout source code
         uses: actions/checkout@v7
 
-      - name: Set up Java 21
+      - name: Set up Java 25
         uses: actions/setup-java@v6
         with:
           distribution: temurin
-          java-version: '21'
+          java-version: '25'
           cache: maven
 
       - name: Make Maven wrapper executable
@@ -126,7 +126,33 @@ jobs:
             frontend-dist-1.0.0.zip
             frontend-dist-1.0.0.zip.sha256
           if-no-files-found: error
-          retention-days: 30
+          retention-days: 
+            
+      - name: Debug GitHub OIDC claims
+        shell: bash
+        run: |
+          TOKEN_RESPONSE=$(curl -sS \
+            -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=sts.amazonaws.com")
+
+          TOKEN=$(echo "$TOKEN_RESPONSE" | python3 -c \
+            "import sys,json; print(json.load(sys.stdin)['value'])")
+
+          export TOKEN
+          python3 - <<'PY'
+          import os, json, base64
+
+          token = os.environ["TOKEN"]
+          payload = token.split(".")[1]
+          payload += "=" * (-len(payload) % 4)
+          claims = json.loads(base64.urlsafe_b64decode(payload))
+
+          print("Issuer:", claims.get("iss"))
+          print("Audience:", claims.get("aud"))
+          print("Subject:", claims.get("sub"))
+          PY
+
+          unset TOKEN
 
       - name: Configure AWS credentials using OIDC
         uses: aws-actions/configure-aws-credentials@v4
@@ -162,4 +188,3 @@ jobs:
 
           sha256sum releasetrack-1.0.0.zip \
             > releasetrack-1.0.0.zip.sha256
-
