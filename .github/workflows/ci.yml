@@ -184,3 +184,57 @@ jobs:
 
           aws s3 cp releasetrack-eb-1.0.0.zip "$S3_PATH/elasticbeanstalk/"
           aws s3 cp releasetrack-eb-1.0.0.zip.sha256 "$S3_PATH/elasticbeanstalk/"
+      
+      - name: Create Elastic Beanstalk application version
+        run: |
+          EXISTING_VERSION=$(aws elasticbeanstalk describe-application-versions \
+            --application-name ReleaseTrack \
+            --version-labels "${GITHUB_SHA}" \
+            --region ap-south-1 \
+            --query 'ApplicationVersions[0].VersionLabel' \
+            --output text)
+
+          if [ "$EXISTING_VERSION" = "$GITHUB_SHA" ]; then
+            echo "Application version already exists. Reusing it."
+          else
+            aws elasticbeanstalk create-application-version \
+              --application-name ReleaseTrack \
+              --version-label "${GITHUB_SHA}" \
+              --source-bundle S3Bucket=releasetrack-artifacts-2026-unique,S3Key="releases/${GITHUB_SHA}/elasticbeanstalk/releasetrack-eb-1.0.0.zip" \
+              --region ap-south-1
+          fi
+
+      - name: Deploy to Elastic Beanstalk
+        run: |
+          aws elasticbeanstalk update-environment \
+            --application-name ReleaseTrack \
+            --environment-name ReleaseTrack-env \
+            --version-label "${GITHUB_SHA}" \
+            --region ap-south-1
+
+      - name: Wait for deployment
+        run: |
+          aws elasticbeanstalk wait environment-updated \
+            --environment-name ReleaseTrack-env \
+            --region ap-south-1
+
+      - name: Verify deployment health
+        run: |
+          read -r STATUS HEALTH VERSION < <(
+            aws elasticbeanstalk describe-environments \
+              --environment-names ReleaseTrack-env \
+              --region ap-south-1 \
+              --query 'Environments[0].[Status,Health,VersionLabel]' \
+              --output text
+          )
+
+          echo "Environment status: $STATUS"
+          echo "Environment health: $HEALTH"
+          echo "Deployed version: $VERSION"
+
+          if [[ "$STATUS" != "Ready" || "$HEALTH" != "Green" || "$VERSION" != "$GITHUB_SHA" ]]; then
+            echo "Deployment verification failed!"
+            exit 1
+          fi
+
+          echo "Deployment successful!"
