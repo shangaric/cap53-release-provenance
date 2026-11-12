@@ -11,7 +11,7 @@ async function request(path, options = {}) {
       },
     })
   } catch {
-    throw new Error('Unable to reach the API. Check that the backend is running on port 5000.')
+    throw new Error('Unable to reach the backend API. Please try again.')
   }
 
   if (!response.ok) {
