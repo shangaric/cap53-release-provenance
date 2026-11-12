@@ -19,3 +19,13 @@ frontend/.env
 *.iml
 .DS_Store
 Thumbs.db
+# Environment secrets
+.env
+.env.*
+!.env.example
+
+# Java / Maven
+*.log
+
+# Node
+npm-debug.log*

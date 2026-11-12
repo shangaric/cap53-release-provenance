@@ -5,12 +5,12 @@ ReleaseTrack is a lightweight release management portal for recording software v
 ## Technology
 
 - **Frontend:** React 18, Vite, JavaScript, React Router, Lucide React
-- **Backend:** Java 21, Spring Boot 3.5, Spring Web, Spring Data JPA, Hibernate, Bean Validation
+- **Backend:** Java 25, Spring Boot 3.5, Spring Web, Spring Data JPA, Hibernate, Bean Validation
 - **Database:** MySQL 8+
 
 ## Prerequisites
 
-- JDK 21 (verify with `java -version`)
+- JDK 25 (verify with `java -version`)
 - Node.js 20+ and npm
 - MySQL Server 8+ running on `localhost:3306`
 - VS Code (recommended extensions: Extension Pack for Java and ES7+ React snippets)
@@ -31,7 +31,7 @@ The backend includes a Maven Wrapper, so a separate Maven installation is not re
 
    ```powershell
    $env:DB_USERNAME = "root"
-   $env:DB_PASSWORD = "your-local-mysql-password"
+   $env:DB_PASSWORD = "your password"
    ```
 
    **Command Prompt**
@@ -41,7 +41,7 @@ The backend includes a Maven Wrapper, so a separate Maven installation is not re
    set DB_PASSWORD=your-local-mysql-password
    ```
 
-   Optional settings are `DB_URL` (defaults to `jdbc:mysql://localhost:3306/releasetrack_db?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC`) and `SERVER_PORT` (defaults to `8080`). Credentials are not stored in Java source.
+   Optional settings are `DB_URL` (defaults to `jdbc:mysql://localhost:3306/releasetrack_db?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC`) and `SERVER_PORT` (defaults to `5000`). Credentials are not stored in Java source.
 
 3. Optional demo records are in `database/sample_data.sql`. Run this only once against a fresh database; it inserts example rows with fixed IDs. In MySQL Workbench, open and execute the script.
 
@@ -58,7 +58,7 @@ cd backend
 .\mvnw.cmd spring-boot:run
 ```
 
-The REST API listens at **http://localhost:8080**. In the Java Projects or Maven view in VS Code, you can also run `com.releasetrack.ReleaseTrackApplication`.
+The REST API listens at **http://localhost:5000**. In the Java Projects or Maven view in VS Code, you can also run `com.releasetrack.ReleaseTrackApplication`.
 
 ### Frontend
 
@@ -68,7 +68,7 @@ npm install
 npm run dev
 ```
 
-Open **http://localhost:5173**. The Vite app calls `http://localhost:8080/api` by default. To use a different API URL, copy `frontend/.env.example` to `frontend/.env` and set `VITE_API_BASE_URL`, then restart Vite.
+Open **http://localhost:5173**. The Vite app calls `http://localhost:5000/api` by default. To use a different API URL, copy `frontend/.env.example` to `frontend/.env` and set `VITE_API_BASE_URL`, then restart Vite.
 
 ### Tests and production build
 
@@ -155,10 +155,10 @@ POST /api/test-evidence
 
 ## Troubleshooting
 
-- **`java` is not Java 21:** Install a JDK 21 distribution and ensure its `bin` directory is first on `PATH`. Open a new VS Code terminal after changing environment variables.
+- **`java` is not Java 25:** Install a JDK 25 distribution and ensure its `bin` directory is first on `PATH`. Open a new VS Code terminal after changing environment variables.
 - **The Maven Wrapper cannot download Maven:** Check your internet connection and run `.\mvnw.cmd -version` again from the `backend` folder.
 - **Cannot connect to MySQL:** Confirm MySQL is running on port 3306, the schema exists, and `DB_USERNAME` / `DB_PASSWORD` match your local account. Spring Boot creates or updates the tables when it connects.
 - **Duplicate version conflict:** Release versions are unique; choose a different version or search the release catalog.
 - **Production deployment conflict:** Create an approval request and approve it first. A pending or rejected request is not sufficient.
-- **Frontend cannot reach the API:** Run the backend on port 8080 and confirm `VITE_API_BASE_URL` points to the API origin plus `/api`.
+- **Frontend cannot reach the API:** Run the backend on port 5000 and confirm `VITE_API_BASE_URL` points to the API origin plus `/api`.
 - **Port already in use:** Set `SERVER_PORT` for the backend. Vite uses port 5173; stop the process currently using it before starting the frontend.
