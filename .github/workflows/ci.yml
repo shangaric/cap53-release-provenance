@@ -1,4 +1,3 @@
-
 name: ReleaseTrack CI
 
 'on':
@@ -12,6 +11,14 @@ name: ReleaseTrack CI
 permissions:
   contents: read
 
+env:
+  AWS_REGION: ap-south-1
+  AWS_ROLE_ARN: arn:aws:iam::021152723784:role/GitHubActions-ReleaseTrack-S3-Upload
+  ARTIFACT_BUCKET: releasetrack-artifacts-2026-unique
+  EB_APPLICATION: ReleaseTrack
+  STAGING_ENV: ReleaseTrack-env
+  EB_ZIP: releasetrack-eb-1.0.0.zip
+
 jobs:
   backend-build:
     name: Backend Build and Test
@@ -21,13 +28,7 @@ jobs:
     steps:
       - name: Checkout source code
         uses: actions/checkout@v7
-        
-      - name: Download frontend build
-        uses: actions/download-artifact@v7
-        with:
-          name: frontend-dist
-          path: backend/src/main/resources/static 
-          
+
       - name: Set up Java 25
         uses: actions/setup-java@v6
         with:
@@ -35,11 +36,21 @@ jobs:
           java-version: '25'
           cache: maven
 
+      - name: Download frontend build
+        uses: actions/download-artifact@v7
+        with:
+          name: frontend-dist
+          path: backend/src/main/resources/static
+
       - name: Make Maven wrapper executable
         run: chmod +x backend/mvnw
 
       - name: Build and test backend
         run: ./backend/mvnw -B -f backend/pom.xml clean verify
+
+      - name: Verify frontend inside JAR
+        run: |
+          jar tf backend/target/releasetrack-backend-1.0.0.jar | grep 'BOOT-INF/classes/static/index.html'
 
       - name: Upload backend JAR
         uses: actions/upload-artifact@v7
@@ -78,6 +89,10 @@ jobs:
           path: frontend/dist/
           if-no-files-found: error
 
+  # ---------------------------------------------------------------------------
+  # BUILD ONCE: package, checksum, store in S3, register the EB application
+  # version. This job does NOT deploy anything.
+  # ---------------------------------------------------------------------------
   release-artifact:
     name: Create Release Artifact
     runs-on: ubuntu-latest
@@ -93,7 +108,19 @@ jobs:
     # Create release packages only after code is pushed to main.
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
 
+    outputs:
+      release_id: ${{ steps.release.outputs.release_id }}
+      eb_zip_sha256: ${{ steps.checksums.outputs.eb_zip_sha256 }}
+
     steps:
+      - name: Set unique release ID
+        id: release
+        run: |
+          RELEASE_ID="${GITHUB_SHA}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          echo "RELEASE_ID=${RELEASE_ID}" >> "$GITHUB_ENV"
+          echo "release_id=${RELEASE_ID}" >> "$GITHUB_OUTPUT"
+          echo "Release ID: ${RELEASE_ID}"
+
       - name: Download backend JAR
         uses: actions/download-artifact@v7
         with:
@@ -104,7 +131,7 @@ jobs:
         uses: actions/download-artifact@v7
         with:
           name: frontend-dist
-          path: release/frontend/
+          path: release/frontend
 
       - name: Create release metadata
         run: |
@@ -114,6 +141,7 @@ jobs:
             "version": "1.0.0",
             "artifact": "releasetrack-1.0.0.zip",
             "source_commit": "${GITHUB_SHA}",
+            "release_id": "${RELEASE_ID}",
             "build_date_utc": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           }
           EOF
@@ -142,6 +170,7 @@ jobs:
           zip ../releasetrack-eb-1.0.0.zip application.jar Procfile
 
       - name: Generate SHA-256 checksums
+        id: checksums
         run: |
           sha256sum release/releasetrack-backend-1.0.0.jar \
             > release/releasetrack-backend-1.0.0.jar.sha256
@@ -151,9 +180,12 @@ jobs:
 
           sha256sum releasetrack-1.0.0.zip \
             > releasetrack-1.0.0.zip.sha256
-          
+
           sha256sum releasetrack-eb-1.0.0.zip \
             > releasetrack-eb-1.0.0.zip.sha256
+
+          # Expose the deployable artifact's hash so later jobs can compare against it
+          echo "eb_zip_sha256=$(cut -d' ' -f1 releasetrack-eb-1.0.0.zip.sha256)" >> "$GITHUB_OUTPUT"
 
       - name: Upload final release package
         uses: actions/upload-artifact@v7
@@ -173,12 +205,12 @@ jobs:
       - name: Configure AWS credentials using OIDC
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: arn:aws:iam::021152723784:role/GitHubActions-ReleaseTrack-S3-Upload
-          aws-region: ap-south-1
+          role-to-assume: ${{ env.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
 
       - name: Upload release packages to S3
         run: |
-          S3_PATH="s3://releasetrack-artifacts-2026-unique/releases/${GITHUB_SHA}"
+          S3_PATH="s3://${ARTIFACT_BUCKET}/releases/${RELEASE_ID}"
 
           aws s3 cp release/releasetrack-backend-1.0.0.jar "$S3_PATH/backend/"
           aws s3 cp release/releasetrack-backend-1.0.0.jar.sha256 "$S3_PATH/backend/"
@@ -191,46 +223,88 @@ jobs:
 
           aws s3 cp releasetrack-eb-1.0.0.zip "$S3_PATH/elasticbeanstalk/"
           aws s3 cp releasetrack-eb-1.0.0.zip.sha256 "$S3_PATH/elasticbeanstalk/"
-      
+
       - name: Create Elastic Beanstalk application version
         run: |
-          EXISTING_VERSION=$(aws elasticbeanstalk describe-application-versions \
-            --application-name ReleaseTrack \
-            --version-labels "${GITHUB_SHA}" \
-            --region ap-south-1 \
-            --query 'ApplicationVersions[0].VersionLabel' \
+          aws elasticbeanstalk create-application-version \
+            --application-name "$EB_APPLICATION" \
+            --version-label "${RELEASE_ID}" \
+            --source-bundle S3Bucket="$ARTIFACT_BUCKET",S3Key="releases/${RELEASE_ID}/elasticbeanstalk/${EB_ZIP}" \
+            --region "$AWS_REGION"
+
+  # ---------------------------------------------------------------------------
+  # DEPLOY TO STAGING: no checkout, no build tools. Uses only the stored artifact.
+  # ---------------------------------------------------------------------------
+  deploy-staging:
+    name: Deploy to Staging
+    runs-on: ubuntu-latest
+    needs: release-artifact
+    environment: staging
+    env:
+      RELEASE_ID: ${{ needs.release-artifact.outputs.release_id }}
+
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Configure AWS credentials using OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Download release artifact from S3
+        run: |
+          S3_PATH="s3://${ARTIFACT_BUCKET}/releases/${RELEASE_ID}/elasticbeanstalk"
+          mkdir -p staging
+          aws s3 cp "$S3_PATH/${EB_ZIP}" staging/
+          aws s3 cp "$S3_PATH/${EB_ZIP}.sha256" staging/
+
+      - name: Verify checksum matches the build job
+        env:
+          EXPECTED_SHA256: ${{ needs.release-artifact.outputs.eb_zip_sha256 }}
+        run: |
+          cd staging
+          sha256sum -c "${EB_ZIP}.sha256"
+          ACTUAL=$(sha256sum "${EB_ZIP}" | cut -d' ' -f1)
+          echo "Built by build job: $EXPECTED_SHA256"
+          echo "Downloaded from S3: $ACTUAL"
+          test "$ACTUAL" = "$EXPECTED_SHA256"
+
+      - name: Confirm EB version points to the verified artifact
+        run: |
+          EXPECTED_KEY="releases/${RELEASE_ID}/elasticbeanstalk/${EB_ZIP}"
+          ACTUAL_KEY=$(aws elasticbeanstalk describe-application-versions \
+            --application-name "$EB_APPLICATION" \
+            --version-labels "${RELEASE_ID}" \
+            --region "$AWS_REGION" \
+            --query 'ApplicationVersions[0].SourceBundle.S3Key' \
             --output text)
+          echo "Expected S3 key: $EXPECTED_KEY"
+          echo "EB version key:  $ACTUAL_KEY"
+          test "$ACTUAL_KEY" = "$EXPECTED_KEY"
 
-          if [ "$EXISTING_VERSION" = "$GITHUB_SHA" ]; then
-            echo "Application version already exists. Reusing it."
-          else
-            aws elasticbeanstalk create-application-version \
-              --application-name ReleaseTrack \
-              --version-label "${GITHUB_SHA}" \
-              --source-bundle S3Bucket=releasetrack-artifacts-2026-unique,S3Key="releases/${GITHUB_SHA}/elasticbeanstalk/releasetrack-eb-1.0.0.zip" \
-              --region ap-south-1
-          fi
-
-      - name: Deploy to Elastic Beanstalk
+      - name: Deploy to staging
         run: |
           aws elasticbeanstalk update-environment \
-            --application-name ReleaseTrack \
-            --environment-name ReleaseTrack-env \
-            --version-label "${GITHUB_SHA}" \
-            --region ap-south-1
+            --application-name "$EB_APPLICATION" \
+            --environment-name "$STAGING_ENV" \
+            --version-label "${RELEASE_ID}" \
+            --region "$AWS_REGION"
 
       - name: Wait for deployment
         run: |
           aws elasticbeanstalk wait environment-updated \
-            --environment-name ReleaseTrack-env \
-            --region ap-south-1
+            --environment-name "$STAGING_ENV" \
+            --region "$AWS_REGION"
 
       - name: Verify deployment health
         run: |
           read -r STATUS HEALTH VERSION < <(
             aws elasticbeanstalk describe-environments \
-              --environment-names ReleaseTrack-env \
-              --region ap-south-1 \
+              --environment-names "$STAGING_ENV" \
+              --region "$AWS_REGION" \
               --query 'Environments[0].[Status,Health,VersionLabel]' \
               --output text
           )
@@ -239,9 +313,47 @@ jobs:
           echo "Environment health: $HEALTH"
           echo "Deployed version: $VERSION"
 
-          if [[ "$STATUS" != "Ready" || "$HEALTH" != "Green" || "$VERSION" != "$GITHUB_SHA" ]]; then
+          if [[ "$STATUS" != "Ready" || "$HEALTH" != "Green" || "$VERSION" != "$RELEASE_ID" ]]; then
             echo "Deployment verification failed!"
             exit 1
           fi
 
-          echo "Deployment successful!"
+          echo "Staging deployment successful!"
+
+      - name: Run staging smoke tests
+        run: |
+          CNAME=$(aws elasticbeanstalk describe-environments \
+            --environment-names "$STAGING_ENV" \
+            --region "$AWS_REGION" \
+            --query 'Environments[0].CNAME' \
+            --output text)
+          STAGING_URL="http://${CNAME}"
+          echo "Testing ${STAGING_URL}"
+
+          mkdir -p evidence
+          echo "check,url,http_code" > evidence/smoke-results.csv
+
+          check() {
+            NAME="$1"
+            URL="$2"
+            CODE=$(curl --silent --show-error --location \
+              --retry 5 --retry-delay 5 --retry-connrefused \
+              --output /dev/null --write-out '%{http_code}' "$URL")
+            echo "${NAME}: HTTP ${CODE}"
+            echo "${NAME},${URL},${CODE}" >> evidence/smoke-results.csv
+            [ "$CODE" = "200" ]
+          }
+
+          check frontend "${STAGING_URL}/"
+          check dashboard_api "${STAGING_URL}/api/dashboard/stats"
+
+          echo "All staging smoke tests passed!"
+
+      - name: Upload smoke test evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: staging-smoke-evidence-${{ env.RELEASE_ID }}
+          path: evidence/smoke-results.csv
+          if-no-files-found: ignore
+          retention-days: 30
