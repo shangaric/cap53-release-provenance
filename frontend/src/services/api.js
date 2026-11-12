@@ -1,4 +1,4 @@
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8080/api'
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000/api'
 
 async function request(path, options = {}) {
   let response
@@ -11,7 +11,7 @@ async function request(path, options = {}) {
       },
     })
   } catch {
-    throw new Error('Unable to reach the API. Check that the backend is running on port 8080.')
+    throw new Error('Unable to reach the API. Check that the backend is running on port 5000.')
   }
 
   if (!response.ok) {
