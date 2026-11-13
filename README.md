@@ -1,6 +1,12 @@
+
+
+<!-- Step 6: Test rejected production promotion -->
+ReleaseTrack rejection workflow test.
+
 # ReleaseTrack
 
 ReleaseTrack is a lightweight release management portal for recording software versions, deployment outcomes, approval decisions, and test evidence. It is an application-only project: it does not provision infrastructure, build artifacts, or automate deployments.
+
 
 ## Technology
 
