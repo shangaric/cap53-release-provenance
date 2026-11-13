@@ -1,5 +1,5 @@
 name: ReleaseTrack CI
- 
+
 'on':
   push:
     branches:
@@ -7,10 +7,10 @@ name: ReleaseTrack CI
   pull_request:
     branches:
       - main
- 
+
 permissions:
   contents: read
- 
+
 env:
   AWS_REGION: ap-south-1
   AWS_ROLE_ARN: arn:aws:iam::021152723784:role/GitHubActions-ReleaseTrack-S3-Upload
@@ -18,77 +18,79 @@ env:
   EB_APPLICATION: ReleaseTrack
   STAGING_ENV: ReleaseTrack-env
   EB_ZIP: releasetrack-eb-1.0.0.zip
- 
+  AWS_PROD_ROLE_ARN: arn:aws:iam::021152723784:role/GitHubActions-ReleaseTrack-Production
+  PROD_ENV: ReleaseTrack-prod
+
 jobs:
   backend-build:
     name: Backend Build and Test
     runs-on: ubuntu-latest
     needs: frontend-build
- 
+
     steps:
       - name: Checkout source code
         uses: actions/checkout@v7
- 
+
       - name: Set up Java 25
         uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: '25'
           cache: maven
- 
+
       - name: Download frontend build
         uses: actions/download-artifact@v7
         with:
           name: frontend-dist
           path: backend/src/main/resources/static
- 
+
       - name: Make Maven wrapper executable
         run: chmod +x backend/mvnw
- 
+
       - name: Build and test backend
         run: ./backend/mvnw -B -f backend/pom.xml clean verify
- 
+
       - name: Verify frontend inside JAR
         run: |
           jar tf backend/target/releasetrack-backend-1.0.0.jar | grep 'BOOT-INF/classes/static/index.html'
- 
+
       - name: Upload backend JAR
         uses: actions/upload-artifact@v7
         with:
           name: backend-jar
           path: backend/target/releasetrack-backend-1.0.0.jar
           if-no-files-found: error
- 
+
   frontend-build:
     name: Frontend Build
     runs-on: ubuntu-latest
- 
+
     steps:
       - name: Checkout source code
         uses: actions/checkout@v7
- 
+
       - name: Set up Node.js 24
         uses: actions/setup-node@v7
         with:
           node-version: '24'
           cache: npm
           cache-dependency-path: frontend/package-lock.json
- 
+
       - name: Install frontend dependencies
         working-directory: frontend
         run: npm ci
- 
+
       - name: Build frontend
         working-directory: frontend
         run: npm run build
- 
+
       - name: Upload frontend build
         uses: actions/upload-artifact@v7
         with:
           name: frontend-dist
           path: frontend/dist/
           if-no-files-found: error
- 
+
   # ---------------------------------------------------------------------------
   # BUILD ONCE: package, checksum, store in S3, register the EB application
   # version. This job does NOT deploy anything.
@@ -96,22 +98,22 @@ jobs:
   release-artifact:
     name: Create Release Artifact
     runs-on: ubuntu-latest
- 
+
     permissions:
       contents: read
       id-token: write
- 
+
     needs:
       - backend-build
       - frontend-build
- 
+
     # Create release packages only after code is pushed to main.
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
- 
+
     outputs:
       release_id: ${{ steps.release.outputs.release_id }}
       eb_zip_sha256: ${{ steps.checksums.outputs.eb_zip_sha256 }}
- 
+
     steps:
       - name: Set unique release ID
         id: release
@@ -120,19 +122,19 @@ jobs:
           echo "RELEASE_ID=${RELEASE_ID}" >> "$GITHUB_ENV"
           echo "release_id=${RELEASE_ID}" >> "$GITHUB_OUTPUT"
           echo "Release ID: ${RELEASE_ID}"
- 
+
       - name: Download backend JAR
         uses: actions/download-artifact@v7
         with:
           name: backend-jar
           path: release/
- 
+
       - name: Download frontend build
         uses: actions/download-artifact@v7
         with:
           name: frontend-dist
           path: release/frontend
- 
+
       - name: Create release metadata
         run: |
           cat > release/release-metadata.json <<EOF
@@ -145,48 +147,48 @@ jobs:
             "build_date_utc": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           }
           EOF
- 
+
       - name: Package frontend for deployment
         run: |
           cd release
           zip -r ../frontend-dist-1.0.0.zip frontend/
- 
+
       - name: Package complete release ZIP
         run: zip -r releasetrack-1.0.0.zip release/
- 
+
       - name: Prepare Elastic Beanstalk deployment package
         run: |
           mkdir -p eb-deployment
- 
+
           cp release/releasetrack-backend-1.0.0.jar \
             eb-deployment/application.jar
- 
+
           echo "web: java -jar application.jar" \
             > eb-deployment/Procfile
- 
+
       - name: Package Elastic Beanstalk deployment ZIP
         run: |
           cd eb-deployment
           zip ../releasetrack-eb-1.0.0.zip application.jar Procfile
- 
+
       - name: Generate SHA-256 checksums
         id: checksums
         run: |
           sha256sum release/releasetrack-backend-1.0.0.jar \
             > release/releasetrack-backend-1.0.0.jar.sha256
- 
+
           sha256sum frontend-dist-1.0.0.zip \
             > frontend-dist-1.0.0.zip.sha256
- 
+
           sha256sum releasetrack-1.0.0.zip \
             > releasetrack-1.0.0.zip.sha256
- 
+
           sha256sum releasetrack-eb-1.0.0.zip \
             > releasetrack-eb-1.0.0.zip.sha256
- 
+
           # Expose the deployable artifact's hash so later jobs can compare against it
           echo "eb_zip_sha256=$(cut -d' ' -f1 releasetrack-eb-1.0.0.zip.sha256)" >> "$GITHUB_OUTPUT"
- 
+
       - name: Upload final release package
         uses: actions/upload-artifact@v7
         with:
@@ -201,29 +203,29 @@ jobs:
             releasetrack-eb-1.0.0.zip.sha256
           if-no-files-found: error
           retention-days: 30
- 
+
       - name: Configure AWS credentials using OIDC
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ env.AWS_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
- 
+
       - name: Upload release packages to S3
         run: |
           S3_PATH="s3://${ARTIFACT_BUCKET}/releases/${RELEASE_ID}"
- 
+
           aws s3 cp release/releasetrack-backend-1.0.0.jar "$S3_PATH/backend/"
           aws s3 cp release/releasetrack-backend-1.0.0.jar.sha256 "$S3_PATH/backend/"
- 
+
           aws s3 cp frontend-dist-1.0.0.zip "$S3_PATH/frontend/"
           aws s3 cp frontend-dist-1.0.0.zip.sha256 "$S3_PATH/frontend/"
- 
+
           aws s3 cp releasetrack-1.0.0.zip "$S3_PATH/"
           aws s3 cp releasetrack-1.0.0.zip.sha256 "$S3_PATH/"
- 
+
           aws s3 cp releasetrack-eb-1.0.0.zip "$S3_PATH/elasticbeanstalk/"
           aws s3 cp releasetrack-eb-1.0.0.zip.sha256 "$S3_PATH/elasticbeanstalk/"
- 
+
       - name: Create Elastic Beanstalk application version
         run: |
           aws elasticbeanstalk create-application-version \
@@ -231,13 +233,13 @@ jobs:
             --version-label "${RELEASE_ID}" \
             --source-bundle S3Bucket="$ARTIFACT_BUCKET",S3Key="releases/${RELEASE_ID}/elasticbeanstalk/${EB_ZIP}" \
             --region "$AWS_REGION"
- 
+
       - name: Write release manifest to ledger
         env:
           EB_ZIP_SHA256: ${{ steps.checksums.outputs.eb_zip_sha256 }}
         run: |
           RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
- 
+
           jq -n \
             --arg release_id "$RELEASE_ID" \
             --arg commit_sha "$GITHUB_SHA" \
@@ -248,15 +250,15 @@ jobs:
             --arg built_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
             '{release_id:$release_id, commit_sha:$commit_sha, version_label:$version_label, s3_key:$s3_key, sha256:$sha256, workflow_run_url:$run_url, built_at:$built_at}' \
             > manifest.json
- 
+
           cat manifest.json
- 
+
           aws s3api put-object \
             --bucket "$ARTIFACT_BUCKET" \
             --key "ledger/releases/${RELEASE_ID}.json" \
             --body manifest.json \
             --content-type application/json
- 
+
   # ---------------------------------------------------------------------------
   # DEPLOY TO STAGING: no checkout, no build tools. Uses only the stored artifact.
   # ---------------------------------------------------------------------------
@@ -267,25 +269,25 @@ jobs:
     environment: staging
     env:
       RELEASE_ID: ${{ needs.release-artifact.outputs.release_id }}
- 
+
     permissions:
       contents: read
       id-token: write
- 
+
     steps:
       - name: Configure AWS credentials using OIDC
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ env.AWS_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
- 
+
       - name: Download release artifact from S3
         run: |
           S3_PATH="s3://${ARTIFACT_BUCKET}/releases/${RELEASE_ID}/elasticbeanstalk"
           mkdir -p staging
           aws s3 cp "$S3_PATH/${EB_ZIP}" staging/
           aws s3 cp "$S3_PATH/${EB_ZIP}.sha256" staging/
- 
+
       - name: Verify checksum matches the build job
         env:
           EXPECTED_SHA256: ${{ needs.release-artifact.outputs.eb_zip_sha256 }}
@@ -296,7 +298,7 @@ jobs:
           echo "Built by build job: $EXPECTED_SHA256"
           echo "Downloaded from S3: $ACTUAL"
           test "$ACTUAL" = "$EXPECTED_SHA256"
- 
+
       - name: Confirm EB version points to the verified artifact
         run: |
           EXPECTED_KEY="releases/${RELEASE_ID}/elasticbeanstalk/${EB_ZIP}"
@@ -309,7 +311,7 @@ jobs:
           echo "Expected S3 key: $EXPECTED_KEY"
           echo "EB version key:  $ACTUAL_KEY"
           test "$ACTUAL_KEY" = "$EXPECTED_KEY"
- 
+
       - name: Deploy to staging
         run: |
           aws elasticbeanstalk update-environment \
@@ -317,13 +319,13 @@ jobs:
             --environment-name "$STAGING_ENV" \
             --version-label "${RELEASE_ID}" \
             --region "$AWS_REGION"
- 
+
       - name: Wait for deployment
         run: |
           aws elasticbeanstalk wait environment-updated \
             --environment-name "$STAGING_ENV" \
             --region "$AWS_REGION"
- 
+
       - name: Verify deployment health
         run: |
           read -r STATUS HEALTH VERSION < <(
@@ -333,18 +335,18 @@ jobs:
               --query 'Environments[0].[Status,Health,VersionLabel]' \
               --output text
           )
- 
+
           echo "Environment status: $STATUS"
           echo "Environment health: $HEALTH"
           echo "Deployed version: $VERSION"
- 
+
           if [[ "$STATUS" != "Ready" || "$HEALTH" != "Green" || "$VERSION" != "$RELEASE_ID" ]]; then
             echo "Deployment verification failed!"
             exit 1
           fi
- 
+
           echo "Staging deployment successful!"
- 
+
       - name: Write deployment record to ledger
         env:
           EB_ZIP_SHA256: ${{ needs.release-artifact.outputs.eb_zip_sha256 }}
@@ -356,7 +358,7 @@ jobs:
             --region "$AWS_REGION" \
             --query 'Environments[0].VersionLabel' \
             --output text)
- 
+
           jq -n \
             --arg release_id "$RELEASE_ID" \
             --arg environment "staging" \
@@ -368,15 +370,15 @@ jobs:
             --arg deployed_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
             '{release_id:$release_id, environment:$environment, type:$deploy_type, result:$result, eb_version_label:$eb_version_label, verified_sha256:$verified_sha256, workflow_run_url:$run_url, deployed_at:$deployed_at}' \
             > deployment.json
- 
+
           cat deployment.json
- 
+
           aws s3api put-object \
             --bucket "$ARTIFACT_BUCKET" \
             --key "ledger/deployments/${RELEASE_ID}/staging-${STAMP}-DEPLOY.json" \
             --body deployment.json \
             --content-type application/json
- 
+
       - name: Run staging smoke tests
         run: |
           CNAME=$(aws elasticbeanstalk describe-environments \
@@ -386,26 +388,34 @@ jobs:
             --output text)
           STAGING_URL="http://${CNAME}"
           echo "Testing ${STAGING_URL}"
- 
+
           mkdir -p evidence
           echo "check,url,http_code" > evidence/smoke-results.csv
- 
+
           check() {
             NAME="$1"
             URL="$2"
             CODE=$(curl --silent --show-error --location \
+              --connect-timeout 10 --max-time 30 \
               --retry 5 --retry-delay 5 --retry-connrefused \
-              --output /dev/null --write-out '%{http_code}' "$URL")
+              --output /dev/null --write-out '%{http_code}' "$URL" || true)
+            CODE="${CODE:-000}"
             echo "${NAME}: HTTP ${CODE}"
             echo "${NAME},${URL},${CODE}" >> evidence/smoke-results.csv
             [ "$CODE" = "200" ]
           }
- 
-          check frontend "${STAGING_URL}/"
-          check dashboard_api "${STAGING_URL}/api/dashboard/stats"
- 
+
+          FAILED=0
+          check frontend "${STAGING_URL}/" || FAILED=1
+          check dashboard_api "${STAGING_URL}/api/dashboard/stats" || FAILED=1
+
+          if [ "$FAILED" -ne 0 ]; then
+            echo "Staging smoke tests FAILED"
+            exit 1
+          fi
+
           echo "All staging smoke tests passed!"
- 
+
       - name: Upload smoke test evidence
         if: always()
         uses: actions/upload-artifact@v7
@@ -414,10 +424,303 @@ jobs:
           path: evidence/smoke-results.csv
           if-no-files-found: ignore
           retention-days: 30
- 
+
       - name: Write test evidence to ledger
         if: always() && hashFiles('evidence/smoke-results.csv') != ''
         run: |
           aws s3 cp evidence/smoke-results.csv \
             "s3://${ARTIFACT_BUCKET}/ledger/evidence/${RELEASE_ID}/staging-smoke.csv"
- 
+
+  # ---------------------------------------------------------------------------
+  # PROMOTE TO PRODUCTION: starts only after a reviewer approves the
+  # "production" GitHub Environment. No checkout, no build tools. It deploys
+  # the same stored artifact that staging already verified.
+  # ---------------------------------------------------------------------------
+  promote-prod:
+    name: Promote to Production
+    runs-on: ubuntu-latest
+    needs:
+      - release-artifact
+      - deploy-staging
+    environment: production
+
+    permissions:
+      contents: read
+      id-token: write
+      actions: read
+
+    env:
+      RELEASE_ID: ${{ needs.release-artifact.outputs.release_id }}
+      GH_TOKEN: ${{ github.token }}
+
+    steps:
+      - name: Configure AWS credentials (production role)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.AWS_PROD_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Block revoked releases
+        run: |
+          COUNT=$(aws s3api list-objects-v2 \
+            --bucket "$ARTIFACT_BUCKET" \
+            --prefix "ledger/revoked/${RELEASE_ID}.json" \
+            --max-keys 1 \
+            --query 'KeyCount' \
+            --output text)
+
+          echo "Revoked markers found: $COUNT"
+
+          if [ "$COUNT" != "0" ]; then
+            echo "Release ${RELEASE_ID} is REVOKED (or the check returned an unexpected value). Promotion blocked."
+            exit 1
+          fi
+
+          echo "Release is not revoked."
+
+      - name: Record approval in ledger
+        run: |
+          mkdir -p prod
+          gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/approvals" \
+            > prod/approvals-raw.json
+
+          jq --arg release_id "$RELEASE_ID" --arg environment "production" \
+            '{release_id:$release_id, environment:$environment, decision:"APPROVED",
+              approvals:[.[] | {state:.state, approver:.user.login, comment:.comment}]}' \
+            prod/approvals-raw.json > prod/approval.json
+
+          cat prod/approval.json
+
+          aws s3api put-object \
+            --bucket "$ARTIFACT_BUCKET" \
+            --key "ledger/approvals/${RELEASE_ID}/production.json" \
+            --body prod/approval.json \
+            --content-type application/json
+
+      - name: Download and verify the stored artifact
+        env:
+          EXPECTED_SHA256: ${{ needs.release-artifact.outputs.eb_zip_sha256 }}
+        run: |
+          S3_PATH="s3://${ARTIFACT_BUCKET}/releases/${RELEASE_ID}/elasticbeanstalk"
+          mkdir -p prod
+          aws s3 cp "$S3_PATH/${EB_ZIP}" prod/
+          aws s3 cp "$S3_PATH/${EB_ZIP}.sha256" prod/
+
+          cd prod
+          sha256sum -c "${EB_ZIP}.sha256"
+          ACTUAL=$(sha256sum "${EB_ZIP}" | cut -d' ' -f1)
+
+          MANIFEST_SHA=$(aws s3 cp "s3://${ARTIFACT_BUCKET}/ledger/releases/${RELEASE_ID}.json" - | jq -r '.sha256')
+
+          STAGING_KEY=$(aws s3api list-objects-v2 \
+            --bucket "$ARTIFACT_BUCKET" \
+            --prefix "ledger/deployments/${RELEASE_ID}/staging-" \
+            --query 'Contents[0].Key' \
+            --output text)
+          test "$STAGING_KEY" != "None"
+          STAGING_SHA=$(aws s3 cp "s3://${ARTIFACT_BUCKET}/${STAGING_KEY}" - | jq -r '.verified_sha256')
+
+          echo "Downloaded from S3:          $ACTUAL"
+          echo "Built by build job:          $EXPECTED_SHA256"
+          echo "Ledger manifest:             $MANIFEST_SHA"
+          echo "Verified in staging deploy:  $STAGING_SHA"
+
+          test "$ACTUAL" = "$EXPECTED_SHA256"
+          test "$ACTUAL" = "$MANIFEST_SHA"
+          test "$ACTUAL" = "$STAGING_SHA"
+
+          echo "VERIFIED_SHA256=${ACTUAL}" >> "$GITHUB_ENV"
+          echo "STAGING_SHA256=${STAGING_SHA}" >> "$GITHUB_ENV"
+
+      - name: Confirm EB version points to the verified artifact
+        run: |
+          EXPECTED_KEY="releases/${RELEASE_ID}/elasticbeanstalk/${EB_ZIP}"
+          ACTUAL_KEY=$(aws elasticbeanstalk describe-application-versions \
+            --application-name "$EB_APPLICATION" \
+            --version-labels "${RELEASE_ID}" \
+            --region "$AWS_REGION" \
+            --query 'ApplicationVersions[0].SourceBundle.S3Key' \
+            --output text)
+          echo "Expected S3 key: $EXPECTED_KEY"
+          echo "EB version key:  $ACTUAL_KEY"
+          test "$ACTUAL_KEY" = "$EXPECTED_KEY"
+
+      - name: Deploy to production
+        run: |
+          aws elasticbeanstalk update-environment \
+            --application-name "$EB_APPLICATION" \
+            --environment-name "$PROD_ENV" \
+            --version-label "${RELEASE_ID}" \
+            --region "$AWS_REGION"
+
+      - name: Wait for deployment
+        run: |
+          aws elasticbeanstalk wait environment-updated \
+            --environment-name "$PROD_ENV" \
+            --region "$AWS_REGION"
+
+      - name: Verify deployment health
+        run: |
+          read -r STATUS HEALTH VERSION < <(
+            aws elasticbeanstalk describe-environments \
+              --environment-names "$PROD_ENV" \
+              --region "$AWS_REGION" \
+              --query 'Environments[0].[Status,Health,VersionLabel]' \
+              --output text
+          )
+
+          echo "Environment status: $STATUS"
+          echo "Environment health: $HEALTH"
+          echo "Deployed version: $VERSION"
+
+          if [[ "$STATUS" != "Ready" || "$HEALTH" != "Green" || "$VERSION" != "$RELEASE_ID" ]]; then
+            echo "Deployment verification failed!"
+            exit 1
+          fi
+
+          echo "Production deployment successful!"
+
+      - name: Run production smoke tests
+        run: |
+          CNAME=$(aws elasticbeanstalk describe-environments \
+            --environment-names "$PROD_ENV" \
+            --region "$AWS_REGION" \
+            --query 'Environments[0].CNAME' \
+            --output text)
+          PROD_URL="http://${CNAME}"
+          echo "Testing ${PROD_URL}"
+
+          mkdir -p evidence
+          echo "check,url,http_code" > evidence/smoke-results.csv
+
+          check() {
+            NAME="$1"
+            URL="$2"
+            CODE=$(curl --silent --show-error --location \
+              --connect-timeout 10 --max-time 30 \
+              --retry 5 --retry-delay 5 --retry-connrefused \
+              --output /dev/null --write-out '%{http_code}' "$URL" || true)
+            CODE="${CODE:-000}"
+            echo "${NAME}: HTTP ${CODE}"
+            echo "${NAME},${URL},${CODE}" >> evidence/smoke-results.csv
+            [ "$CODE" = "200" ]
+          }
+
+          FAILED=0
+          check frontend "${PROD_URL}/" || FAILED=1
+          check dashboard_api "${PROD_URL}/api/dashboard/stats" || FAILED=1
+
+          if [ "$FAILED" -ne 0 ]; then
+            echo "Production smoke tests FAILED"
+            exit 1
+          fi
+
+          echo "All production smoke tests passed!"
+
+      - name: Write deployment record to ledger
+        run: |
+          RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          STAMP=$(date -u +%Y%m%dT%H%M%SZ)
+          DEPLOYED_LABEL=$(aws elasticbeanstalk describe-environments \
+            --environment-names "$PROD_ENV" \
+            --region "$AWS_REGION" \
+            --query 'Environments[0].VersionLabel' \
+            --output text)
+
+          jq -n \
+            --arg release_id "$RELEASE_ID" \
+            --arg environment "production" \
+            --arg deploy_type "DEPLOY" \
+            --arg result "SUCCEEDED" \
+            --arg eb_version_label "$DEPLOYED_LABEL" \
+            --arg verified_sha256 "$VERIFIED_SHA256" \
+            --arg staging_verified_sha256 "$STAGING_SHA256" \
+            --arg run_url "$RUN_URL" \
+            --arg deployed_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            '{release_id:$release_id, environment:$environment, type:$deploy_type, result:$result, eb_version_label:$eb_version_label, verified_sha256:$verified_sha256, staging_verified_sha256:$staging_verified_sha256, hashes_match:($verified_sha256 == $staging_verified_sha256), workflow_run_url:$run_url, deployed_at:$deployed_at}' \
+            > deployment.json
+
+          cat deployment.json
+
+          aws s3api put-object \
+            --bucket "$ARTIFACT_BUCKET" \
+            --key "ledger/deployments/${RELEASE_ID}/production-${STAMP}-DEPLOY.json" \
+            --body deployment.json \
+            --content-type application/json
+
+      - name: Write test evidence to ledger
+        if: always() && hashFiles('evidence/smoke-results.csv') != ''
+        run: |
+          aws s3 cp evidence/smoke-results.csv \
+            "s3://${ARTIFACT_BUCKET}/ledger/evidence/${RELEASE_ID}/production-smoke.csv"
+
+  # ---------------------------------------------------------------------------
+  # RECORD REJECTION: runs when promote-prod did not succeed. If a reviewer
+  # rejected the deployment, the rejection is written to the ledger.
+  # ---------------------------------------------------------------------------
+  record-rejection:
+    name: Record Rejected Promotion
+    runs-on: ubuntu-latest
+    needs:
+      - release-artifact
+      - promote-prod
+    if: always() && needs.promote-prod.result != 'success' && needs.promote-prod.result != 'skipped'
+
+    permissions:
+      contents: read
+      id-token: write
+      actions: read
+
+    env:
+      RELEASE_ID: ${{ needs.release-artifact.outputs.release_id }}
+      GH_TOKEN: ${{ github.token }}
+
+    steps:
+      - name: Configure AWS credentials using OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Record rejection in ledger
+        run: |
+          gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/approvals" \
+            > approvals-raw.json
+
+          REJECTED=$(jq '[.[] | select(.state == "rejected")] | length' approvals-raw.json)
+          if [ "$REJECTED" -eq 0 ]; then
+            echo "promote-prod did not succeed, but no reviewer rejected it. Nothing to record here."
+            exit 0
+          fi
+
+          RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          STAMP=$(date -u +%Y%m%dT%H%M%SZ)
+
+          jq --arg release_id "$RELEASE_ID" --arg environment "production" \
+            '{release_id:$release_id, environment:$environment, decision:"REJECTED",
+              approvals:[.[] | {state:.state, approver:.user.login, comment:.comment}]}' \
+            approvals-raw.json > rejection.json
+
+          aws s3api put-object \
+            --bucket "$ARTIFACT_BUCKET" \
+            --key "ledger/approvals/${RELEASE_ID}/production-rejected.json" \
+            --body rejection.json \
+            --content-type application/json
+
+          jq -n \
+            --arg release_id "$RELEASE_ID" \
+            --arg environment "production" \
+            --arg deploy_type "PROMOTION" \
+            --arg result "REJECTED" \
+            --arg run_url "$RUN_URL" \
+            --arg recorded_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            '{release_id:$release_id, environment:$environment, type:$deploy_type, result:$result, workflow_run_url:$run_url, recorded_at:$recorded_at}' \
+            > deployment-rejected.json
+
+          cat deployment-rejected.json
+
+          aws s3api put-object \
+            --bucket "$ARTIFACT_BUCKET" \
+            --key "ledger/deployments/${RELEASE_ID}/production-${STAMP}-REJECTED.json" \
+            --body deployment-rejected.json \
+            --content-type application/json
