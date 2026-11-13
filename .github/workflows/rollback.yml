@@ -1,0 +1,294 @@
+name: Rollback Production
+
+'on':
+  workflow_dispatch:
+    inputs:
+      release_id:
+        description: 'Release ID to roll back to (must have run in production before)'
+        required: true
+        type: string
+      reason:
+        description: 'Why are you rolling back?'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  AWS_REGION: ap-south-1
+  AWS_PROD_ROLE_ARN: arn:aws:iam::021152723784:role/GitHubActions-ReleaseTrack-Production
+  ARTIFACT_BUCKET: releasetrack-artifacts-2026-unique
+  EB_APPLICATION: ReleaseTrack
+  PROD_ENV: ReleaseTrack-prod
+  EB_ZIP: releasetrack-eb-1.0.0.zip
+
+jobs:
+  rollback:
+    name: Roll Back Production
+    runs-on: ubuntu-latest
+    # Same approval gate as a normal promotion
+    environment: production
+
+    permissions:
+      contents: read
+      id-token: write
+      actions: read
+
+    env:
+      RELEASE_ID: ${{ inputs.release_id }}
+      REASON: ${{ inputs.reason }}
+      GH_TOKEN: ${{ github.token }}
+
+    steps:
+      - name: Validate release ID
+        run: |
+          if [[ ! "$RELEASE_ID" =~ ^[0-9a-f]{40}-[0-9]+-[0-9]+$ ]]; then
+            echo "Release ID has the wrong format: $RELEASE_ID"
+            exit 1
+          fi
+
+      - name: Configure AWS credentials (production role)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.AWS_PROD_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Block revoked releases
+        run: |
+          COUNT=$(aws s3api list-objects-v2 \
+            --bucket "$ARTIFACT_BUCKET" \
+            --prefix "ledger/revoked/${RELEASE_ID}.json" \
+            --max-keys 1 \
+            --query 'KeyCount' \
+            --output text)
+
+          echo "Revoked markers found: $COUNT"
+
+          if [ "$COUNT" != "0" ]; then
+            echo "Release ${RELEASE_ID} is REVOKED (or the check returned an unexpected value). Rollback blocked."
+            exit 1
+          fi
+
+          echo "Release is not revoked."
+
+      - name: Check the release ran in production before
+        run: |
+          KEYS=$(aws s3api list-objects-v2 \
+            --bucket "$ARTIFACT_BUCKET" \
+            --prefix "ledger/deployments/${RELEASE_ID}/production-" \
+            --query "Contents[?ends_with(Key, '-DEPLOY.json')].Key" \
+            --output text)
+
+          if [ -z "$KEYS" ] || [ "$KEYS" = "None" ]; then
+            echo "No earlier production deployment is recorded for ${RELEASE_ID}."
+            echo "Rollback only targets releases that already ran in production."
+            exit 1
+          fi
+
+          PROD_KEY=$(echo "$KEYS" | tr '\t' '\n' | head -n 1)
+          aws s3 cp "s3://${ARTIFACT_BUCKET}/${PROD_KEY}" prev-deploy.json
+          cat prev-deploy.json
+
+          test "$(jq -r '.hashes_match' prev-deploy.json)" = "true"
+          echo "PROD_VERIFIED_SHA256=$(jq -r '.verified_sha256' prev-deploy.json)" >> "$GITHUB_ENV"
+
+      - name: Record approval in ledger
+        run: |
+          gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/approvals" \
+            > approvals-raw.json
+
+          jq --arg release_id "$RELEASE_ID" --arg environment "production" --arg purpose "ROLLBACK" \
+            '{release_id:$release_id, environment:$environment, purpose:$purpose, decision:"APPROVED",
+              approvals:[.[] | {state:.state, approver:.user.login, comment:.comment}]}' \
+            approvals-raw.json > approval.json
+
+          cat approval.json
+
+          aws s3api put-object \
+            --bucket "$ARTIFACT_BUCKET" \
+            --key "ledger/approvals/${RELEASE_ID}/production-rollback-${GITHUB_RUN_ID}.json" \
+            --body approval.json \
+            --content-type application/json
+
+      - name: Download and verify the stored artifact
+        run: |
+          S3_PATH="s3://${ARTIFACT_BUCKET}/releases/${RELEASE_ID}/elasticbeanstalk"
+          mkdir -p rollback
+          aws s3 cp "$S3_PATH/${EB_ZIP}" rollback/
+          aws s3 cp "$S3_PATH/${EB_ZIP}.sha256" rollback/
+
+          cd rollback
+          sha256sum -c "${EB_ZIP}.sha256"
+          ACTUAL=$(sha256sum "${EB_ZIP}" | cut -d' ' -f1)
+
+          MANIFEST_SHA=$(aws s3 cp "s3://${ARTIFACT_BUCKET}/ledger/releases/${RELEASE_ID}.json" - | jq -r '.sha256')
+
+          echo "Downloaded from S3:              $ACTUAL"
+          echo "Ledger manifest:                 $MANIFEST_SHA"
+          echo "Verified in earlier prod deploy: $PROD_VERIFIED_SHA256"
+
+          test "$ACTUAL" = "$MANIFEST_SHA"
+          test "$ACTUAL" = "$PROD_VERIFIED_SHA256"
+
+          echo "VERIFIED_SHA256=${ACTUAL}" >> "$GITHUB_ENV"
+
+      - name: Confirm EB version points to the verified artifact
+        run: |
+          EXPECTED_KEY="releases/${RELEASE_ID}/elasticbeanstalk/${EB_ZIP}"
+          ACTUAL_KEY=$(aws elasticbeanstalk describe-application-versions \
+            --application-name "$EB_APPLICATION" \
+            --version-labels "${RELEASE_ID}" \
+            --region "$AWS_REGION" \
+            --query 'ApplicationVersions[0].SourceBundle.S3Key' \
+            --output text)
+          echo "Expected S3 key: $EXPECTED_KEY"
+          echo "EB version key:  $ACTUAL_KEY"
+          test "$ACTUAL_KEY" = "$EXPECTED_KEY"
+
+      - name: Remember what is running now
+        run: |
+          PREVIOUS_LABEL=$(aws elasticbeanstalk describe-environments \
+            --environment-names "$PROD_ENV" \
+            --region "$AWS_REGION" \
+            --query 'Environments[0].VersionLabel' \
+            --output text)
+          echo "Production currently runs: $PREVIOUS_LABEL"
+          echo "PREVIOUS_LABEL=${PREVIOUS_LABEL}" >> "$GITHUB_ENV"
+
+          if [ "$PREVIOUS_LABEL" = "$RELEASE_ID" ]; then
+            echo "Production already runs this release. Nothing to roll back."
+            exit 1
+          fi
+
+      - name: Roll back production
+        run: |
+          aws elasticbeanstalk update-environment \
+            --application-name "$EB_APPLICATION" \
+            --environment-name "$PROD_ENV" \
+            --version-label "${RELEASE_ID}" \
+            --region "$AWS_REGION"
+
+      - name: Wait for deployment
+        run: |
+          aws elasticbeanstalk wait environment-updated \
+            --environment-name "$PROD_ENV" \
+            --region "$AWS_REGION"
+
+      - name: Verify deployment health
+        run: |
+          read -r STATUS HEALTH VERSION < <(
+            aws elasticbeanstalk describe-environments \
+              --environment-names "$PROD_ENV" \
+              --region "$AWS_REGION" \
+              --query 'Environments[0].[Status,Health,VersionLabel]' \
+              --output text
+          )
+
+          echo "Environment status: $STATUS"
+          echo "Environment health: $HEALTH"
+          echo "Deployed version: $VERSION"
+
+          if [[ "$STATUS" != "Ready" || "$HEALTH" != "Green" || "$VERSION" != "$RELEASE_ID" ]]; then
+            echo "Rollback verification failed!"
+            exit 1
+          fi
+
+          echo "Rollback deployment successful!"
+
+      - name: Run production smoke tests
+        run: |
+          CNAME=$(aws elasticbeanstalk describe-environments \
+            --environment-names "$PROD_ENV" \
+            --region "$AWS_REGION" \
+            --query 'Environments[0].CNAME' \
+            --output text)
+          PROD_URL="http://${CNAME}"
+          echo "Testing ${PROD_URL}"
+
+          mkdir -p evidence
+          echo "check,url,http_code" > evidence/smoke-results.csv
+
+          check() {
+            NAME="$1"
+            URL="$2"
+            CODE=$(curl --silent --show-error --location \
+              --connect-timeout 10 --max-time 30 \
+              --retry 5 --retry-delay 5 --retry-connrefused \
+              --output /dev/null --write-out '%{http_code}' "$URL" || true)
+            CODE="${CODE:-000}"
+            echo "${NAME}: HTTP ${CODE}"
+            echo "${NAME},${URL},${CODE}" >> evidence/smoke-results.csv
+            [ "$CODE" = "200" ]
+          }
+
+          FAILED=0
+          check frontend "${PROD_URL}/" || FAILED=1
+          check dashboard_api "${PROD_URL}/api/dashboard/stats" || FAILED=1
+
+          if [ "$FAILED" -ne 0 ]; then
+            echo "Production smoke tests FAILED"
+            exit 1
+          fi
+
+          echo "All production smoke tests passed!"
+
+      - name: Write rollback records to ledger
+        run: |
+          RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          STAMP=$(date -u +%Y%m%dT%H%M%SZ)
+          DEPLOYED_LABEL=$(aws elasticbeanstalk describe-environments \
+            --environment-names "$PROD_ENV" \
+            --region "$AWS_REGION" \
+            --query 'Environments[0].VersionLabel' \
+            --output text)
+
+          jq -n \
+            --arg release_id "$RELEASE_ID" \
+            --arg environment "production" \
+            --arg deploy_type "ROLLBACK" \
+            --arg result "SUCCEEDED" \
+            --arg eb_version_label "$DEPLOYED_LABEL" \
+            --arg replaced_release "$PREVIOUS_LABEL" \
+            --arg verified_sha256 "$VERIFIED_SHA256" \
+            --arg reason "$REASON" \
+            --arg triggered_by "$GITHUB_ACTOR" \
+            --arg run_url "$RUN_URL" \
+            --arg deployed_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            '{release_id:$release_id, environment:$environment, type:$deploy_type, result:$result, eb_version_label:$eb_version_label, replaced_release:$replaced_release, verified_sha256:$verified_sha256, reason:$reason, triggered_by:$triggered_by, workflow_run_url:$run_url, deployed_at:$deployed_at}' \
+            > rollback.json
+
+          cat rollback.json
+
+          aws s3api put-object \
+            --bucket "$ARTIFACT_BUCKET" \
+            --key "ledger/deployments/${RELEASE_ID}/production-${STAMP}-ROLLBACK.json" \
+            --body rollback.json \
+            --content-type application/json
+
+          # Also note it in the history of the release that was replaced
+          if [[ "$PREVIOUS_LABEL" =~ ^[0-9a-f]{40}-[0-9]+-[0-9]+$ ]]; then
+            jq -n \
+              --arg release_id "$PREVIOUS_LABEL" \
+              --arg environment "production" \
+              --arg deploy_type "ROLLED_BACK" \
+              --arg replaced_by "$RELEASE_ID" \
+              --arg reason "$REASON" \
+              --arg triggered_by "$GITHUB_ACTOR" \
+              --arg run_url "$RUN_URL" \
+              --arg recorded_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+              '{release_id:$release_id, environment:$environment, type:$deploy_type, replaced_by:$replaced_by, reason:$reason, triggered_by:$triggered_by, workflow_run_url:$run_url, recorded_at:$recorded_at}' \
+              > rolled-back.json
+
+            aws s3api put-object \
+              --bucket "$ARTIFACT_BUCKET" \
+              --key "ledger/deployments/${PREVIOUS_LABEL}/production-${STAMP}-ROLLED_BACK.json" \
+              --body rolled-back.json \
+              --content-type application/json
+          fi
+
+      - name: Write test evidence to ledger
+        if: always() && hashFiles('evidence/smoke-results.csv') != ''
+        run: |
+          aws s3 cp evidence/smoke-results.csv \
+            "s3://${ARTIFACT_BUCKET}/ledger/evidence/${RELEASE_ID}/production-rollback-smoke-${GITHUB_RUN_ID}.csv"

@@ -1,0 +1,77 @@
+name: Revoke Release
+ 
+'on':
+  workflow_dispatch:
+    inputs:
+      release_id:
+        description: 'Release ID to revoke (the file name in ledger/releases/ without .json)'
+        required: true
+        type: string
+      reason:
+        description: 'Why is this release being revoked?'
+        required: true
+        type: string
+ 
+permissions:
+  contents: read
+ 
+env:
+  AWS_REGION: ap-south-1
+  AWS_ROLE_ARN: arn:aws:iam::021152723784:role/GitHubActions-ReleaseTrack-S3-Upload
+  ARTIFACT_BUCKET: releasetrack-artifacts-2026-unique
+ 
+jobs:
+  revoke:
+    name: Revoke Release
+    runs-on: ubuntu-latest
+ 
+    permissions:
+      contents: read
+      id-token: write
+ 
+    env:
+      RELEASE_ID: ${{ inputs.release_id }}
+      REASON: ${{ inputs.reason }}
+ 
+    steps:
+      - name: Validate release ID
+        run: |
+          if [[ ! "$RELEASE_ID" =~ ^[0-9a-f]{40}-[0-9]+-[0-9]+$ ]]; then
+            echo "Release ID has the wrong format: $RELEASE_ID"
+            exit 1
+          fi
+ 
+      - name: Configure AWS credentials using OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+ 
+      - name: Confirm the release exists in the ledger
+        run: |
+          aws s3 cp "s3://${ARTIFACT_BUCKET}/ledger/releases/${RELEASE_ID}.json" manifest.json
+          jq '{release_id, commit_sha, sha256}' manifest.json
+ 
+      - name: Write revoked marker to ledger
+        run: |
+          RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+ 
+          jq -n \
+            --arg release_id "$RELEASE_ID" \
+            --arg reason "$REASON" \
+            --arg revoked_by "$GITHUB_ACTOR" \
+            --arg run_url "$RUN_URL" \
+            --arg revoked_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            '{release_id:$release_id, status:"REVOKED", reason:$reason, revoked_by:$revoked_by, workflow_run_url:$run_url, revoked_at:$revoked_at}' \
+            > revoked.json
+ 
+          cat revoked.json
+ 
+          aws s3api put-object \
+            --bucket "$ARTIFACT_BUCKET" \
+            --key "ledger/revoked/${RELEASE_ID}.json" \
+            --body revoked.json \
+            --content-type application/json
+ 
+          echo "Release ${RELEASE_ID} is now revoked. Promotion and rollback to it are blocked."
+ 

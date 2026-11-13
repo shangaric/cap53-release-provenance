@@ -454,36 +454,11 @@ jobs:
       GH_TOKEN: ${{ github.token }}
 
     steps:
-      - name: Debug GitHub OIDC claims
-        run: |
-          set -euo pipefail
-          
-          TOKEN_RESPONSE=$(curl -sS \
-            -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
-            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=sts.amazonaws.com")
-
-          JWT=$(echo "$TOKEN_RESPONSE" | jq -r '.value')
-
-          JWT="$JWT" python3 -c '
-          import os, json, base64
-          token = os.environ["JWT"]
-          payload = token.split(".")[1]
-          payload += "=" * ((4 - len(payload) % 4) % 4)
-          claims = json.loads(base64.urlsafe_b64decode(payload))
-          print(json.dumps({
-              "iss": claims.get("iss"),
-              "aud": claims.get("aud"),
-              "sub": claims.get("sub"),
-              "repository": claims.get("repository"),
-              "ref": claims.get("ref")
-          }, indent=2))'
-
       - name: Configure AWS credentials (production role)
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ env.AWS_PROD_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
-      
 
       - name: Block revoked releases
         run: |
@@ -498,6 +473,26 @@ jobs:
 
           if [ "$COUNT" != "0" ]; then
             echo "Release ${RELEASE_ID} is REVOKED (or the check returned an unexpected value). Promotion blocked."
+
+            RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+            STAMP=$(date -u +%Y%m%dT%H%M%SZ)
+
+            jq -n \
+              --arg release_id "$RELEASE_ID" \
+              --arg environment "production" \
+              --arg deploy_type "PROMOTION" \
+              --arg result "BLOCKED_REVOKED" \
+              --arg run_url "$RUN_URL" \
+              --arg recorded_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+              '{release_id:$release_id, environment:$environment, type:$deploy_type, result:$result, workflow_run_url:$run_url, recorded_at:$recorded_at}' \
+              > blocked.json
+
+            aws s3api put-object \
+              --bucket "$ARTIFACT_BUCKET" \
+              --key "ledger/deployments/${RELEASE_ID}/production-${STAMP}-BLOCKED.json" \
+              --body blocked.json \
+              --content-type application/json
+
             exit 1
           fi
 
