@@ -744,3 +744,66 @@ jobs:
             --key "ledger/deployments/${RELEASE_ID}/production-${STAMP}-REJECTED.json" \
             --body deployment-rejected.json \
             --content-type application/json
+
+  # ---------------------------------------------------------------------------
+  # PROVENANCE REPORT: after a successful production deployment, build the
+  # commit-to-production report from the S3 ledger.
+  # ---------------------------------------------------------------------------
+  provenance-report:
+    name: Provenance Report
+    runs-on: ubuntu-latest
+    needs:
+      - release-artifact
+      - promote-prod
+    if: needs.promote-prod.result == 'success'
+
+    permissions:
+      contents: read
+      id-token: write
+
+    env:
+      RELEASE_ID: ${{ needs.release-artifact.outputs.release_id }}
+
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: python -m pip install boto3
+
+      - name: Configure AWS credentials using OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Generate provenance report
+        run: |
+          python scripts/provenance_report.py \
+            --bucket "$ARTIFACT_BUCKET" \
+            --region "$AWS_REGION" \
+            --release-id "$RELEASE_ID" \
+            --out-dir report
+
+      - name: Show report in the run summary
+        if: always() && hashFiles('report/*.md') != ''
+        run: cat "report/provenance-${RELEASE_ID}.md" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload report as a build artifact
+        if: always() && hashFiles('report/*.md') != ''
+        uses: actions/upload-artifact@v7
+        with:
+          name: provenance-report-${{ env.RELEASE_ID }}
+          path: report/
+          retention-days: 90
+
+      - name: Store report in the ledger
+        if: always() && hashFiles('report/*.md') != ''
+        run: |
+          aws s3 cp "report/provenance-${RELEASE_ID}.md" \
+            "s3://${ARTIFACT_BUCKET}/ledger/reports/${RELEASE_ID}/provenance.md"
