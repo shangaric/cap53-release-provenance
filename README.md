@@ -1,7 +1,7 @@
 
 
-<!-- Step 6: Test rejected production promotion -->
-ReleaseTrack rejection workflow test.
+<!-- Test  production promotion -->
+ReleaseTrack  workflow test.
 
 # ReleaseTrack
 
